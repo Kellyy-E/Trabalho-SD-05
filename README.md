@@ -2,6 +2,8 @@
 
 Sistema distribuído desenvolvido em **Java 17**, **Docker Compose**, **RabbitMQ** (Topic Exchange, Dead Letter Queue e Manual ACK) e **Inteligência Artificial (Smile)** para classificação automática de mensagens via Processamento de Linguagem Natural (NLP).
 
+> 📺 **Vídeo de Demonstração do Projeto:** [Assista no YouTube (https://youtu.be/8XTMWBmj4_M)](https://youtu.be/8XTMWBmj4_M)
+
 ---
 
 ## 🚀 Como Executar o Projeto (Passo a Passo)
