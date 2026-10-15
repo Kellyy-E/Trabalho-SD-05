@@ -1,6 +1,6 @@
 # Sistema Distribuído de Classificação Inteligente de Mensagens
 
-Sistema distribuído desenvolvido em **Java 17**, **Docker Compose**, **RabbitMQ** (Topic Exchange, Dead Letter Queue e Manual ACK) e **Inteligência Artificial (Smile)** para classificação automática de mensagens via NLP.
+Sistema distribuído desenvolvido em **Java 17**, **Docker Compose**, **RabbitMQ** (Topic Exchange, Dead Letter Queue e Manual ACK) e **Inteligência Artificial (Smile)** para classificação automática de mensagens via Processamento de Linguagem Natural (NLP).
 
 ---
 
@@ -22,11 +22,6 @@ Abra o navegador no endereço:
 - **Usuário:** `guest`
 - **Senha:** `guest`
 
-Na aba **Queues**, acompanhe em tempo real:
-- `reviews.queue`: Mensagens de avaliações acumulando e sendo consumidas.
-- `support.queue`: Mensagens de suporte técnico sendo processadas.
-- `dead_letter.queue`: Mensagens com falha forçada sendo encaminhadas para a **DLQ**.
-
 ### 3. Comandos Úteis
 - **Executar em segundo plano (modo detached):**
   ```bash
@@ -47,30 +42,92 @@ Na aba **Queues**, acompanhe em tempo real:
   docker compose down
   ```
 
+---
 
-## 📦 Descrição dos 4 Containers
+## 🏛️ Arquitetura e Topologia de Mensageria (RabbitMQ)
 
-1. **`message-generator` (Container 1 - Produtor Java)**
-   - Publica continuamente a uma taxa $\ge$ 5 msgs/s (~6.6 msgs/s, intervalo de 150ms).
-   - Envia dois tipos de mensagens com identificador UUID, timestamp e conteúdo:
-     - `review.product`: comentários simulados de avaliações de produtos.
-     - `support.request`: relatos simulados de problemas técnicos (com injeção periódica de erros propositais para teste da DLQ).
+O fluxo de comunicação assíncrono entre os componentes obedece à seguinte arquitetura:
 
-2. **`rabbitmq-broker` (Container 2 - Broker RabbitMQ)**
-   - Imagem oficial `rabbitmq:3-management` com painel web na porta `15672` e porta AMQP `5672`.
-   - Contém a Topic Exchange `messages.topic`, a Dead Letter Exchange `messages.dlx` e as filas `reviews.queue`, `support.queue` e `dead_letter.queue`.
+```
+                        +----------------------------------+
+                        |   Container 1: Gerador (Java)    |
+                        |   Taxa: >= 5 mensagens/segundo   |
+                        +-----------------+----------------+
+                                          |
+                                          | publica via AMQP (JSON)
+                                          v
+                        +-----------------+----------------+
+                        |  Container 2: Broker RabbitMQ    |
+                        |   Exchange: messages.topic       |
+                        +--------+----------------+--------+
+                                 |                |
+             review.product      |                | support.request
+                                 v                v
+                         +---------------+  +---------------+
+                         | reviews.queue |  | support.queue |
+                         +-------+-------+  +-------+-------+
+                                 |                  |
+               Manual ACK após   v                  v  Manual ACK / basicNack (requeue=false)
+                         +---------------+  +---------------+
+                         |  Container 3  |  |  Container 4  |
+                         |  Consumidor 1 |  |  Consumidor 2 |
+                         | (Sentimento)  |  |   (Suporte)   |
+                         +---------------+  +-------+-------+
+                                                    | (em caso de erro)
+                                                    v
+                                            +---------------+
+                                            | messages.dlx  |
+                                            +-------+-------+
+                                                    | routing key: #
+                                                    v
+                                            +---------------+
+                                            | dead_letter.  |
+                                            |     queue     |
+                                            +---------------+
+```
 
-3. **`consumer-sentiment` (Container 3 - Consumidor 1: Sentimento)**
-   - Consome da fila `reviews.queue`.
-   - Classifica o sentimento em: **Positiva**, **Negativa** ou **Neutra** usando a biblioteca **Smile**.
-   - Contém atraso proposital de 800ms por mensagem (`basicQos(1)`), sendo mais lento que o produtor para forçar acúmulo visível da fila no RabbitMQ.
-   - Envia **Manual ACK** (`channel.basicAck`) após processar cada mensagem.
+### Configuração das Exchanges
+A listagem exibe as exchanges criadas para o sistema, evidenciando as exchanges `messages.dlx` e `messages.topic`, ambas corretamente configuradas com o Type "topic":
 
-4. **`consumer-support` (Container 4 - Consumidor 2: Suporte & DLQ)**
-   - Consome da fila `support.queue`.
-   - Classifica o problema em: **Problema de acesso**, **Problema de desempenho** ou **Problema de conexão** usando a biblioteca **Smile**.
-   - Processamento lento (800ms) com **Manual ACK**.
-   - **Demonstração da DLQ**: detecta mensagens de erro forçado e executa `channel.basicNack(deliveryTag, false, requeue=false)`. O RabbitMQ encaminha automaticamente essas mensagens para a `dead_letter.queue`.
+![Aba Exchanges no RabbitMQ](images/exchanges.png)
+
+### Regras de Roteamento (Bindings) da Topic Exchange
+A seção de "Bindings" na parte inferior da imagem evidencia as regras de roteamento, mostrando explicitamente que a chave `review.product` encaminha mensagens para a `reviews.queue` e a chave `support.request` encaminha para a `support.queue`:
+
+![Detalhes da Exchange messages.topic e Bindings](images/messages-topic.png)
+
+---
+
+## 📦 Execução dos Contêineres e Logs do Terminal
+
+### 1. `message-generator` (Container 1 - Produtor Java)
+Demonstração da produção das mensagens no terminal. Os logs detalham o envio de mensagens do tipo `[SUPPORT]` usando a routing key `support.request` e mensagens `[REVIEW]` com a routing key `review.product`, incluindo também uma mensagem de estatística com a contagem total de envios e a quantidade de falhas simuladas direcionadas à DLQ:
+
+![Logs do message-generator](images/message-generator.png)
+
+### 2. `consumer-sentiment` (Container 3 - Consumidor 1: Análise de Sentimento)
+Logs de execução do contêiner `consumer-sentiment`. A tela exibe o processamento bem-sucedido de avaliações de produtos, detalhando o ID da mensagem, data/hora, o conteúdo do texto, a classificação de sentimento gerada pela IA (como NEUTRA e POSITIVA, acompanhada da porcentagem de confiança), o tempo de processamento de aproximadamente 801 ms, e a confirmação de recebimento através do envio do Manual ACK:
+
+![Logs do consumer-sentiment](images/consumer-sentiment.png)
+
+### 3. `consumer-support` (Container 4 - Consumidor 2: Classificação de Suporte)
+Logs do contêiner `consumer-support` exibindo solicitações técnicas sendo classificadas com sucesso, listando o ID, o conteúdo do problema relatado, a categoria classificada pela IA (como PROBLEMA DE CONEXÃO e PROBLEMA DE ACESSO), o tempo de processamento e a confirmação via Manual ACK:
+
+![Logs do consumer-support](images/consumer-support.png)
+
+---
+
+## 📊 Monitoramento de Filas e Dead Letter Queue (DLQ)
+
+### Visão Geral das Filas e Demonstração do Gargalo
+Tela da aba "Queues" (Filas) no painel do RabbitMQ, listando a visão geral de todas as três filas criadas para o projeto. A imagem comprova o gargalo intencional das filas, mostrando 1.171 mensagens retidas na `reviews.queue`, 1.271 mensagens retidas na `support.queue`, e 91 mensagens na `dead_letter.queue`:
+
+![Visão Geral das Filas e Gargalo](images/filas.png)
+
+### Detalhamento da Fila de Mensagens Mortas (`dead_letter.queue`)
+Captura da interface de gerenciamento do RabbitMQ focada na visualização detalhada da fila `dead_letter.queue`. O gráfico e as estatísticas da página comprovam que a fila de mensagens mortas acumulou 113 mensagens com o status "Ready":
+
+![Detalhes da Dead Letter Queue](images/dead_letter.png)
 
 ---
 
@@ -83,7 +140,7 @@ Para a classificação de texto em linguagem natural, foi utilizada a biblioteca
    - Tokenização e filtragem de termos curtos.
 2. **Vetorização (Bag-of-Words Normalizado)**:
    - Construção de vocabulário e contagem de termos por mensagem.
-   - Aplicação de **Normalização Euclidiana ($L_2$)** no vetor de frequências para eliminar distorções de tamanho do texto.
+   - Aplicação de **Normalização Euclidiana ($L_2$)** no vetor de frequências para eliminar distorções causadas pelo tamanho do texto.
 3. **Classificação Supervisionada K-NN (`smile.classification.KNN`)**:
    - O algoritmo calcula a distância euclidiana para os vizinhos mais próximos ($k=3$), inferindo a categoria com precisão e rapidez.
 
@@ -96,8 +153,16 @@ Trabalho-SD-05/
 ├── docker-compose.yml              # Orquestração dos 4 serviços
 ├── Dockerfile                      # Multi-stage build (Maven + JRE 17 Alpine)
 ├── pom.xml                         # Dependências (RabbitMQ, Smile, Jackson, Logback)
-├── README.md                       # Instruções de execução e documentação
+├── README.md                       # Instruções de execução e documentação ilustrada
 ├── .dockerignore                   # Arquivos ignorados no build
+├── images/                         # Capturas de tela e evidências de execução
+│   ├── consumer-sentiment.png
+│   ├── consumer-support.png
+│   ├── dead_letter.png
+│   ├── exchanges.png
+│   ├── filas.png
+│   ├── message-generator.png
+│   └── messages-topic.png
 └── src/
     └── main/
         ├── java/
