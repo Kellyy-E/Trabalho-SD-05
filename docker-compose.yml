@@ -1,0 +1,90 @@
+services:
+  # Container 2: Broker RabbitMQ com Painel Administrativo de Gerenciamento
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672"    # Porta AMQP para conexão dos produtores e consumidores
+      - "15672:15672"  # Porta HTTP do painel Web de gerenciamento (Management UI)
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+      - RABBITMQ_ERLANG_COOKIE=COOKIE_SD_RABBITMQ_2026
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Container 1: Gerador de Mensagens (Producer)
+  # Taxa contínua >= 5 msgs/segundo (reviews.product e support.request)
+  message-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: message-generator
+    environment:
+      - MAIN_CLASS=com.distribuidos.producer.MessageProducer
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASSWORD=guest
+      - MESSAGE_RATE_MS=150   # 150ms de intervalo (~6.6 mensagens/segundo)
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Container 3: Consumidor 1 – Análise de Sentimento (Java + Smile IA)
+  # Consome review.product, classifica em Positiva, Negativa ou Neutra.
+  # Possui atraso proposital para forçar o acúmulo da fila e usa manual ACK.
+  consumer-sentiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: consumer-sentiment
+    environment:
+      - MAIN_CLASS=com.distribuidos.consumer.sentiment.SentimentConsumer
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASSWORD=guest
+      - PROCESSING_DELAY_MS=800  # Atraso intencional mais lento que a taxa de chegada
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # Container 4: Consumidor 2 – Classificação de Solicitações (Java + Smile IA)
+  # Consome support.request, classifica problemas técnicos e demonstra DLQ.
+  consumer-support:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: consumer-support
+    environment:
+      - MAIN_CLASS=com.distribuidos.consumer.support.SupportConsumer
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASSWORD=guest
+      - PROCESSING_DELAY_MS=800  # Atraso intencional mais lento que a taxa de chegada
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
